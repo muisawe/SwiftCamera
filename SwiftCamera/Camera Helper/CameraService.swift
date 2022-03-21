@@ -11,54 +11,9 @@ import AVFoundation
 import Photos
 import UIKit
 
-//  MARK: Class Camera Service, handles setup of AVFoundation needed for a basic camera app.
-public struct Photo: Identifiable, Equatable {
-//    The ID of the captured photo
-    public var id: String
-//    Data representation of the captured photo
-    public var originalData: Data
-    
-    public init(id: String = UUID().uuidString, originalData: Data) {
-        self.id = id
-        self.originalData = originalData
-    }
-}
 
-public struct AlertError {
-    public var title: String = ""
-    public var message: String = ""
-    public var primaryButtonTitle = "Accept"
-    public var secondaryButtonTitle: String?
-    public var primaryAction: (() -> ())?
-    public var secondaryAction: (() -> ())?
-    
-    public init(title: String = "", message: String = "", primaryButtonTitle: String = "Accept", secondaryButtonTitle: String? = nil, primaryAction: (() -> ())? = nil, secondaryAction: (() -> ())? = nil) {
-        self.title = title
-        self.message = message
-        self.primaryAction = primaryAction
-        self.primaryButtonTitle = primaryButtonTitle
-        self.secondaryAction = secondaryAction
-    }
-}
 
-extension Photo {
-    public var compressedData: Data? {
-        ImageResizer(targetWidth: 800).resize(data: originalData)?.jpegData(compressionQuality: 0.5)
-    }
-    public var thumbnailData: Data? {
-        ImageResizer(targetWidth: 100).resize(data: originalData)?.jpegData(compressionQuality: 0.5)
-    }
-    public var thumbnailImage: UIImage? {
-        guard let data = thumbnailData else { return nil }
-        return UIImage(data: data)
-    }
-    public var image: UIImage? {
-        guard let data = compressedData else { return nil }
-        return UIImage(data: data)
-    }
-}
-
-public class CameraService {
+public class CameraService:NSObject {
     typealias PhotoCaptureSessionID = String
     
 //    MARK: Observed Properties UI must react to
@@ -77,6 +32,7 @@ public class CameraService {
     @Published public var isCameraUnavailable = true
 //    8.
     @Published public var photo: Photo?
+    @Published public var videoURL: String?
     
 
 //    MARK: Alert properties
@@ -96,6 +52,15 @@ public class CameraService {
     // Communicate with the session and other session objects on this queue.
     private let sessionQueue = DispatchQueue(label: "session queue")
     
+    fileprivate var captureVideoDevice:AVCaptureDevice!
+    fileprivate var captureAudioDevice:AVCaptureDevice!
+    fileprivate var videoOutput:AVCaptureMovieFileOutput!
+    fileprivate var captureTyp:CameraService.CaptureMode = .photo
+    
+    
+    var videoDelegate:AVCaptureFileOutputRecordingDelegate?
+    var videoOutputUrl:URL?
+    
     @objc dynamic var videoDeviceInput: AVCaptureDeviceInput!
     
     // MARK: Device Configuration Properties
@@ -103,7 +68,7 @@ public class CameraService {
     
     // MARK: Capturing Photos
     
-    private let photoOutput = AVCapturePhotoOutput()
+    private var photoOutput = AVCapturePhotoOutput()
     
     private var inProgressPhotoCaptureDelegates = [Int64: PhotoCaptureProcessor]()
     
@@ -198,24 +163,16 @@ public class CameraService {
                 return
             }
             
-            let videoDeviceInput = try AVCaptureDeviceInput(device: videoDevice)
-            
-            if session.canAddInput(videoDeviceInput) {
-                session.addInput(videoDeviceInput)
-                self.videoDeviceInput = videoDeviceInput
-                
-            } else {
-                print("Couldn't add video device input to the session.")
-                setupResult = .configurationFailed
-                session.commitConfiguration()
-                return
-            }
+            self.setup(.movie)
         } catch {
             print("Couldn't create video device input: \(error)")
             setupResult = .configurationFailed
             session.commitConfiguration()
             return
         }
+        
+        
+        
         
         // Add the photo output.
         if session.canAddOutput(photoOutput) {
@@ -474,4 +431,124 @@ public class CameraService {
             }
         }
     }
+}
+
+
+    // Mark: Video Config
+extension CameraService{
+    
+    
+    func setup(_ type:CameraService.CaptureMode) {
+        
+        
+        captureTyp = type
+        
+         
+        
+        captureVideoDevice = AVCaptureDevice.default(for: AVMediaType.video)
+        captureAudioDevice = AVCaptureDevice.default(for: AVMediaType.audio)
+        
+        do {
+
+            try captureVideoDevice?.lockForConfiguration()
+            captureVideoDevice?.focusMode = .continuousAutoFocus
+            captureVideoDevice?.unlockForConfiguration()
+
+        } catch {
+            print(error.localizedDescription)
+        }
+        
+        do {
+            
+            let inputVideo = try AVCaptureDeviceInput(device: captureVideoDevice)
+            let inputAudio = try AVCaptureDeviceInput(device: captureAudioDevice)
+            videoDeviceInput = inputVideo
+            session.addInput(inputVideo)
+            session.addInput(inputAudio)
+            
+        } catch {
+            print(error.localizedDescription)
+        }
+        
+        switch(type) {
+        case .photo:
+             photoOutput = AVCapturePhotoOutput()
+             session.addOutput(photoOutput)
+        case .movie:
+             videoOutput = AVCaptureMovieFileOutput()
+             session.addOutput(videoOutput)
+            print("Setup for movie")
+        }
+        
+//        previewLayer = AVCaptureVideoPreviewLayer(session: session)
+//        previewLayer.zPosition = -1
+//        previewLayer.contentsGravity = CALayerContentsGravity.resizeAspectFill
+//        previewLayer.videoGravity = AVLayerVideoGravity.resizeAspectFill
+//        previewLayer.frame = rootView.layer.bounds
+//
+       
+     }
+    
+    
+    func record(name:String = "movie") {
+        
+        guard videoOutput != nil else {
+            return
+        }
+        
+        if !videoOutput.isRecording {
+            if case captureTyp = CameraService.CaptureMode.movie {
+             let outputURL = vidURL(name: name)
+             videoOutput.startRecording(to: outputURL, recordingDelegate: videoDelegate ?? self as AVCaptureFileOutputRecordingDelegate)
+                
+            
+          }
+       }
+    }
+    
+    func stopRecord() {
+        
+        guard videoOutput != nil else {
+            return
+        }
+        
+        if videoOutput.isRecording {
+            videoOutput.stopRecording()
+         }
+    }
+    
+    func vidURL(name:String) -> URL {
+        return getDir().appendingPathComponent(name.appending(".mov"))
+    }
+    
+    private func getDir() -> URL {
+       
+       let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+       
+       return paths.first!
+   }
+   
+    
+}
+extension CameraService: AVCaptureFileOutputRecordingDelegate {
+    public func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+       if let error = error {
+           print(error.localizedDescription)
+       }else{
+           print(outputFileURL.absoluteString)
+           self.videoURL = outputFileURL.absoluteString
+           
+           
+       }
+   }
+   
+   func capture(_ output: AVCaptureFileOutput!, didStartRecordingToOutputFileAt fileURL: URL!, fromConnections connections: [Any]!) {}
+   func capture(_ output: AVCaptureFileOutput!, didFinishRecordingToOutputFileAt outputFileURL: URL!, fromConnections connections: [Any]!, error: Error!) {
+      
+       if error != nil {
+           return
+       }
+       
+       self.videoOutputUrl = outputFileURL
+   }
 }
